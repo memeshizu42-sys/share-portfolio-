@@ -283,18 +283,23 @@
 
 <div class="sec-head">
   <h2>現金・MMF</h2>
-  <p>残高を直接入力して管理(取引履歴には入りません)。ドルは現在の為替レートで円換算</p>
+  <p>残高を日付ごとに記録できます(取引履歴には入りません)。最新日付の残高が「現在の残高」として総資産・グラフに反映されます</p>
 </div>
 <div class="tbl-wrap">
 <table>
   <thead><tr>
-    <th style="min-width:180px;">区分</th>
-    <th class="num" style="min-width:150px;">残高</th>
-    <th class="num">評価額 (円)</th>
-    <th class="num">評価額 (ドル)</th>
+    <th style="min-width:140px;">日付</th>
+    <th class="num" style="min-width:130px;">現金(円)</th>
+    <th class="num" style="min-width:130px;">MMF・現金(ドル)</th>
+    <th class="num">評価額 (円換算)</th>
+    <th style="width:40px;"></th>
   </tr></thead>
   <tbody id="cashRows"></tbody>
 </table>
+</div>
+<div class="actions">
+  <button class="btn-text" id="addCashBtn">＋ 残高を記録</button>
+  <span class="note" id="cashNote"></span>
 </div>
 
 <div class="sec-head">
@@ -432,11 +437,18 @@ function totals(){
 const cashJPY = () => (Number(cash.JPY)||0) + (Number(cash.USD)||0)*RATE();
 const cashUSD = () => (Number(cash.JPY)||0)/RATE() + (Number(cash.USD)||0);
 // 現金残高を変更したら履歴に記録(1日1エントリ、同日は上書き)
+function sortCashLog(){ cashLog.sort((a,b)=>String(a.date).localeCompare(String(b.date))); }
+// 現在の残高(cash)は「最新日付の記録」に一致させる
+function syncCurrentCash(){
+  if(cashLog.length){ const e=cashLog[cashLog.length-1]; cash.JPY=Number(e.JPY)||0; cash.USD=Number(e.USD)||0; }
+  else { cash.JPY=0; cash.USD=0; }
+}
 function logCash(){
   const t = today();
-  const last = cashLog[cashLog.length-1];
-  if(last && last.date===t){ last.JPY=Number(cash.JPY)||0; last.USD=Number(cash.USD)||0; }
+  let e = cashLog.find(x=>x.date===t);
+  if(e){ e.JPY=Number(cash.JPY)||0; e.USD=Number(cash.USD)||0; }
   else cashLog.push({date:t, JPY:Number(cash.JPY)||0, USD:Number(cash.USD)||0});
+  sortCashLog();
 }
 // その日時点の現金残高(最初の記録より前は最初の記録の値、記録が無ければ現在残高)
 function cashOn(dn){
@@ -474,6 +486,10 @@ function load(){
       logCash();
       return false;
     });
+    // 旧データ: 履歴が無く残高だけある場合は1件の記録に変換
+    if(!cashLog.length && ((Number(cash.JPY)||0) || (Number(cash.USD)||0)))
+      cashLog = [{date: today(), JPY:Number(cash.JPY)||0, USD:Number(cash.USD)||0}];
+    sortCashLog(); syncCurrentCash();
     rate=d.rate||155; updatedAt=d.updatedAt||null;
     disp=d.disp||'JPY'; pfName=d.pfName||'ポートフォリオ';
   }catch(e){
@@ -912,25 +928,31 @@ function renderSummary(){
 function renderCash(){
   const r = RATE();
   const el = document.getElementById('cashRows');
-  const rows = [
-    {cur:'JPY', label:'現金(円)', badge:'JPY', vJ:Number(cash.JPY)||0, vU:(Number(cash.JPY)||0)/r},
-    {cur:'USD', label:'MMF・現金(ドル)', badge:'USD', vJ:(Number(cash.USD)||0)*r, vU:Number(cash.USD)||0}
-  ];
-  el.innerHTML = rows.map(x=>`
-    <tr>
-      <td><div class="tk-cell"><span class="tk">${x.label}</span>
-        <span class="badge cs">${x.badge}</span></div></td>
-      <td class="num"><input class="mono amt" type="text" inputmode="decimal"
-        value="${fmtIn(cash[x.cur]||0)}" data-cur="${x.cur}"
-        title="${x.cur==='JPY'?'円':'ドル'}の残高を入力"></td>
-      <td class="num mono">${money(x.vJ,'JPY')}</td>
-      <td class="num mono">${money(x.vU,'USD')}</td>
-    </tr>`).join('');
-  el.querySelectorAll('input').forEach(i=>i.addEventListener('change', e=>{
-    const v = parseNum(e.target.value);
-    cash[e.target.dataset.cur] = isNaN(v) ? 0 : v;
-    logCash();
-    save(); render();
+  if(!cashLog.length){
+    el.innerHTML = '<tr><td colspan="5"><div class="empty">現金・MMFの記録がありません。「＋ 残高を記録」から追加してください</div></td></tr>';
+    return;
+  }
+  sortCashLog();
+  el.innerHTML = cashLog.map((e,i)=>{
+    const J = Number(e.JPY)||0, U = Number(e.USD)||0;
+    const latest = i===cashLog.length-1;
+    return `<tr>
+      <td><input type="date" value="${e.date||''}" data-i="${i}" data-f="date" class="mono">${latest?'<span class="cell-sub">現在の残高</span>':''}</td>
+      <td class="num"><input class="mono amt" type="text" inputmode="decimal" value="${fmtIn(J)}" data-i="${i}" data-f="JPY"></td>
+      <td class="num"><input class="mono amt" type="text" inputmode="decimal" value="${fmtIn(U)}" data-i="${i}" data-f="USD"></td>
+      <td class="num mono">${money(J + U*r,'JPY')}</td>
+      <td><button class="del-btn" data-i="${i}" aria-label="削除">×</button></td>
+    </tr>`;
+  }).join('');
+  el.querySelectorAll('input').forEach(inp=>inp.addEventListener('change', e=>{
+    const i = +e.target.dataset.i, f = e.target.dataset.f;
+    if(!cashLog[i]) return;
+    if(f==='date') cashLog[i].date = e.target.value;
+    else { const v = parseNum(e.target.value); cashLog[i][f] = isNaN(v)?0:v; }
+    sortCashLog(); syncCurrentCash(); save(); render();
+  }));
+  el.querySelectorAll('.del-btn').forEach(b=>b.addEventListener('click', e=>{
+    cashLog.splice(+e.target.dataset.i, 1); syncCurrentCash(); save(); render();
   }));
 }
 
@@ -1098,7 +1120,7 @@ function renderTxs(){
     if(info.cash){
       // 現金・MMFは取引履歴ではなく残高管理へ振り替える
       cash[info.cur] = (Number(cash[info.cur])||0) + (t.type==='sell'?-1:1)*(Number(t.qty)||0);
-      logCash();
+      logCash(); syncCurrentCash();
       txs = txs.filter(x=>x.id!==t.id);
       save(); render();
       const n = document.getElementById('note');
@@ -1122,6 +1144,11 @@ document.getElementById('addBtn').addEventListener('click', ()=>{
   txs.push({id:uid(), date:today(), ticker:'', type:'buy', price:0, qty:0});
   txYear = 'all';   // 絞り込み中でも新しい行が見えるように解除
   save(); render();
+});
+document.getElementById('addCashBtn').addEventListener('click', ()=>{
+  const last = cashLog[cashLog.length-1];
+  cashLog.push({date: today(), JPY: last?Number(last.JPY)||0:0, USD: last?Number(last.USD)||0:0});
+  sortCashLog(); syncCurrentCash(); save(); render();
 });
 const pfNameEl = document.getElementById('pfName');
 pfNameEl.addEventListener('keydown', e=>{
