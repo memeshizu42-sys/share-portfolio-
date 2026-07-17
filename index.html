@@ -242,6 +242,10 @@
       <button data-cur="JPY" class="on">¥ 円</button>
       <button data-cur="USD">$ ドル</button>
     </div>
+    <div class="seg" id="scopeSeg">
+      <button data-scope="sec" class="on">証券のみ</button>
+      <button data-scope="total">現金・MMF込み</button>
+    </div>
     <div class="spacer"></div>
     <div class="seg" id="rangeSeg">
       <button data-range="1d">1日</button>
@@ -336,6 +340,8 @@ const KEY = 'portfolio-gf-v1';
 let txs = [], quotes = {}, names = {}, histories = {}, fxHist = null, isinMap = {};
 let intra = {}, fxIntra = null;   // 15分足(直近5日) — 1日/5日チャート用
 let cash = {JPY:0, USD:0};        // 現金・MMF残高(取引履歴とは別管理)
+let cashLog = [];                 // 現金残高の変更履歴(総資産チャート用)
+let chartScope = 'sec';           // チャート表示: 'sec'=証券のみ / 'total'=現金・MMF込み
 let rate = 155, updatedAt = null, disp = 'JPY', range = 'all', chart = null;
 let pfName = 'ポートフォリオ';
 
@@ -425,6 +431,29 @@ function totals(){
 }
 const cashJPY = () => (Number(cash.JPY)||0) + (Number(cash.USD)||0)*RATE();
 const cashUSD = () => (Number(cash.JPY)||0)/RATE() + (Number(cash.USD)||0);
+// 現金残高を変更したら履歴に記録(1日1エントリ、同日は上書き)
+function logCash(){
+  const t = today();
+  const last = cashLog[cashLog.length-1];
+  if(last && last.date===t){ last.JPY=Number(cash.JPY)||0; last.USD=Number(cash.USD)||0; }
+  else cashLog.push({date:t, JPY:Number(cash.JPY)||0, USD:Number(cash.USD)||0});
+}
+// その日時点の現金残高(最初の記録より前は最初の記録の値、記録が無ければ現在残高)
+function cashOn(dn){
+  if(!cashLog.length) return {J:Number(cash.JPY)||0, U:Number(cash.USD)||0};
+  let J=Number(cashLog[0].JPY)||0, U=Number(cashLog[0].USD)||0;
+  for(const e of cashLog){ if(dnum(e.date)<=dn){ J=Number(e.JPY)||0; U=Number(e.USD)||0; } }
+  return {J,U};
+}
+// チャート点列に現金・MMFを上乗せ(評価額・元本の両方に加算)
+function withCash(pts){
+  return pts.map(p=>{
+    const dn = p.day!==undefined ? p.day : dnum(p.date);
+    const c = cashOn(dn), fx = fxOn(dn);
+    const addJ = c.J + c.U*fx, addU = c.J/fx + c.U;
+    return {...p, vJ:p.vJ+addJ, vU:p.vU+addU, cJ:p.cJ+addJ, cU:p.cU+addU};
+  });
+}
 
 /* ---------- storage ---------- */
 function load(){
@@ -435,11 +464,14 @@ function load(){
     histories=d.histories||{}; fxHist=d.fxHist||null;
     intra=d.intra||{}; fxIntra=d.fxIntra||null;
     cash=d.cash||{JPY:0, USD:0};
+    cashLog=Array.isArray(d.cashLog)?d.cashLog:[];
+    chartScope=d.chartScope||'sec';
     // 旧バージョンで取引履歴に入れた現金(JPY/USD/MMF)は残高へ移行
     txs = txs.filter(t=>{
       const info = symInfo(t.ticker);
       if(!info.cash) return true;
       cash[info.cur] = (Number(cash[info.cur])||0) + (t.type==='sell'?-1:1)*(Number(t.qty)||0);
+      logCash();
       return false;
     });
     rate=d.rate||155; updatedAt=d.updatedAt||null;
@@ -454,13 +486,14 @@ function load(){
   document.getElementById('pfName').textContent = pfName;
   document.title = pfName;
   document.querySelectorAll('#curSeg button').forEach(b=>b.classList.toggle('on', b.dataset.cur===disp));
+  document.querySelectorAll('#scopeSeg button').forEach(b=>b.classList.toggle('on', b.dataset.scope===chartScope));
   if(updatedAt) setStatus('最終更新 ' + stamp(updatedAt));
   render();
 }
 function save(){
   const n = document.getElementById('note');
   try{
-    localStorage.setItem(KEY, JSON.stringify({txs,quotes,names,histories,fxHist,intra,fxIntra,cash,rate,updatedAt,disp,isinMap,pfName}));
+    localStorage.setItem(KEY, JSON.stringify({txs,quotes,names,histories,fxHist,intra,fxIntra,cash,cashLog,chartScope,rate,updatedAt,disp,isinMap,pfName}));
     schedulePush();   // 自動同期(接続時のみ動作)
     if(n){ n.textContent='保存しました'; n.classList.add('ok');
       setTimeout(()=>{n.textContent=''; n.classList.remove('ok');},1400); }
@@ -469,7 +502,7 @@ function save(){
 
 /* ---------- 書き出し / 読み込み(他端末への移行用) ---------- */
 function exportData(){
-  const data = {txs,quotes,names,histories,fxHist,intra,fxIntra,cash,rate,updatedAt,disp,isinMap,pfName,
+  const data = {txs,quotes,names,histories,fxHist,intra,fxIntra,cash,cashLog,rate,updatedAt,disp,isinMap,pfName,
     exportedAt: new Date().toISOString(), version: 1};
   const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -496,6 +529,7 @@ function importData(file){
       histories=d.histories||{}; fxHist=d.fxHist||null;
       intra=d.intra||{}; fxIntra=d.fxIntra||null;
       cash=d.cash||{JPY:0, USD:0};
+      cashLog=Array.isArray(d.cashLog)?d.cashLog:[];
       rate=d.rate||155; updatedAt=d.updatedAt||null;
       disp=d.disp||'JPY'; range='all'; pfName=d.pfName||'ポートフォリオ';
       document.getElementById('rate').value = rate;
@@ -516,7 +550,7 @@ function importData(file){
 /* ---------- 共有コード(他端末との共有) ---------- */
 // 自分で入力したデータだけを共有(株価・履歴は取り込み先で自動再取得するので含めない=コードを短く)
 function encodeShare(){
-  const payload = {v:1, txs, names, isinMap, cash, rate, disp, pfName};
+  const payload = {v:1, txs, names, isinMap, cash, cashLog, rate, disp, pfName};
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   let bin = '';
   bytes.forEach(b => bin += String.fromCharCode(b));
@@ -544,6 +578,8 @@ function applyShare(){
   if(!d || !Array.isArray(d.txs)){ note.textContent = 'このコードには取引データがありません'; note.classList.remove('ok'); return; }
   if(txs.length && !confirm('現在のデータを上書きして取り込みます。よろしいですか?')) return;
   txs = d.txs; names = d.names||{}; isinMap = d.isinMap||{}; cash = d.cash||{JPY:0, USD:0};
+  cashLog = Array.isArray(d.cashLog)?d.cashLog:[];
+  cashLog = Array.isArray(d.cashLog)?d.cashLog:[];
   rate = Number(d.rate)>0 ? Number(d.rate) : rate;
   disp = d.disp||'JPY'; range = 'all'; pfName = d.pfName||'ポートフォリオ';
   quotes = {}; histories = {}; intra = {};   // 株価類は取り込み先で再取得
@@ -836,13 +872,14 @@ function intradaySeries(days){
     const d = new Date(T*1000);
     const hm = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     const md = `${d.getMonth()+1}/${d.getDate()}`;
-    out.push({label: days===1 ? hm : `${md} ${hm}`, full: `${md} ${hm}`, vJ, cJ, vU, cU});
+    out.push({label: days===1 ? hm : `${md} ${hm}`, full: `${md} ${hm}`, day, vJ, cJ, vU, cU});
   });
   return out;
 }
 const isIntraday = () => range==='1d' || range==='5d';
 function chartPoints(){
-  return isIntraday() ? intradaySeries(range==='1d'?1:5) : inRange(series());
+  const pts = isIntraday() ? intradaySeries(range==='1d'?1:5) : inRange(series());
+  return chartScope==='total' ? withCash(pts) : pts;
 }
 
 /* ---------- render ---------- */
@@ -892,6 +929,7 @@ function renderCash(){
   el.querySelectorAll('input').forEach(i=>i.addEventListener('change', e=>{
     const v = parseNum(e.target.value);
     cash[e.target.dataset.cur] = isNaN(v) ? 0 : v;
+    logCash();
     save(); render();
   }));
 }
@@ -914,7 +952,7 @@ function renderDeltas(){
   el.innerHTML = `
     <span class="delta">期間の増減<b class="mono ${k}">${signed(d,disp)}</b></span>
     <span class="delta">変化率<b class="mono ${k}">${pct(p)}</b></span>
-    <span class="delta">期間の買付<b class="mono">${signed(c(l)-c(f),disp)}</b></span>
+    <span class="delta">${chartScope==='total'?'期間の買付・入出金':'期間の買付'}<b class="mono">${signed(c(l)-c(f),disp)}</b></span>
     <span class="delta">期間高値<b class="mono">${money(hi,disp)}</b></span>
     <span class="delta">期間安値<b class="mono">${money(lo,disp)}</b></span>`;
 }
@@ -931,13 +969,13 @@ function renderChart(){
   const fill = up ? 'rgba(19,115,51,0.07)' : 'rgba(217,48,37,0.07)';
   const s = j ? '¥' : '$', dec = j ? 0 : 2;
   const datasets = [
-    {label:'評価額', data:pts.map(p=>Math.round(v(p)*100)/100),
+    {label: chartScope==='total' ? '総資産(現金込み)' : '評価額', data:pts.map(p=>Math.round(v(p)*100)/100),
      borderColor:col, backgroundColor:fill, fill:true, borderWidth:2, tension:0.1,
      pointRadius:0, pointHoverRadius:3, pointHoverBackgroundColor:col}
   ];
   // 1日/5日は値動きに合わせて拡大表示するため元本線は出さない(スケールが潰れるのを防ぐ)
   if(!intraMode) datasets.push(
-    {label:'投資元本', data:pts.map(p=>Math.round(c(p)*100)/100),
+    {label: chartScope==='total' ? '投資元本+現金' : '投資元本', data:pts.map(p=>Math.round(c(p)*100)/100),
      borderColor:css('--ink-3'), borderWidth:1, borderDash:[5,4], pointRadius:0,
      pointHoverRadius:0, fill:false});
   chart = new Chart(document.getElementById('valueChart'),{
@@ -1060,6 +1098,7 @@ function renderTxs(){
     if(info.cash){
       // 現金・MMFは取引履歴ではなく残高管理へ振り替える
       cash[info.cur] = (Number(cash[info.cur])||0) + (t.type==='sell'?-1:1)*(Number(t.qty)||0);
+      logCash();
       txs = txs.filter(x=>x.id!==t.id);
       save(); render();
       const n = document.getElementById('note');
@@ -1139,6 +1178,12 @@ document.getElementById('curSeg').addEventListener('click', e=>{
   document.querySelectorAll('#curSeg button').forEach(b=>b.classList.toggle('on', b===e.target));
   save(); renderChart(); renderDeltas();
 });
+document.getElementById('scopeSeg').addEventListener('click', e=>{
+  if(e.target.tagName!=='BUTTON') return;
+  chartScope = e.target.dataset.scope;
+  document.querySelectorAll('#scopeSeg button').forEach(b=>b.classList.toggle('on', b===e.target));
+  save(); renderChart(); renderDeltas();
+});
 
 /* ---------- 自動同期 (textdb.dev) ---------- */
 const SYNC_KEY = 'portfolio-gf-syncid', SYNC_MT = 'portfolio-gf-syncmtime';
@@ -1146,7 +1191,7 @@ let syncId = localStorage.getItem(SYNC_KEY) || '';
 let syncTimer = null, pushTimer = null, applyingRemote = false, lastPushedStr = '';
 
 const syncUrl = () => 'https://textdb.dev/api/data/' + encodeURIComponent(syncId);
-function syncPayload(){ return {v:1, mtime:Date.now(), txs, names, isinMap, cash, rate, disp, pfName}; }
+function syncPayload(){ return {v:1, mtime:Date.now(), txs, names, isinMap, cash, cashLog, rate, disp, pfName}; }
 const payloadCmp = p => JSON.stringify({...p, mtime:0});
 function setSyncStatus(msg, kind){
   const el = document.getElementById('syncStatus');
